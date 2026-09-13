@@ -1,0 +1,28 @@
+# ROS 2 generated files
+build/
+install/
+log/
+
+# Runtime logs
+*.log
+*.txt
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Environment files
+.env
+
+# Generated images
+snapshots/
+detections/
+*.jpg
+*.jpeg
+*.png
+
+*.egg-info/

@@ -1,0 +1,9 @@
+string target_class
+float64 target_x
+float64 target_y
+float64 match_radius_m
+---
+bool success
+string image_path
+float64 confidence
+string reason

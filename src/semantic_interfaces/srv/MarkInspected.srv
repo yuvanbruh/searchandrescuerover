@@ -1,0 +1,6 @@
+uint32 target_id
+string image_path
+float64 confidence
+---
+bool success
+string reason
