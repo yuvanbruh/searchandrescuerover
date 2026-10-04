@@ -33,28 +33,6 @@ The main metrics are target detection, target inspection, time, distance travell
   <img src="https://github.com/user-attachments/assets/710d7015-3609-4235-b4d1-6534fb2d6836" width="90%">
 </p>
 
-
-
-```
- LiDAR + RGB-D camera + IMU
-        |
-   SLAM Toolbox + EKF  ->  occupancy map, robot pose
-        |
-   YOLO + ByteTrack + depth  ->  semantic database (person entries with map coordinates)
-        |
-   Candidate generator (shared)
-        |   up to 8 frontier candidates + up to 8 target candidates
-        |
-   +----+---------------------+
-   |                          |
- Mission 2 rule             PPO policy
- (hand-designed)            (learned)
-   |                          |
-   +----------+---------------+
-              |
-        goal pose -> Nav2 (Smac 2D planner, MPPI controller) -> rover
-```
-
 Everything below the goal selection (Nav2, stuck watchdog, LiDAR-directed recovery, perception, target inspection, result logging) is shared and unchanged between the two policies.
 
 ## Robot and software stack
