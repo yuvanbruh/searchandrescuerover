@@ -1,8 +1,12 @@
-# Search and Rescue Rover: hand-designed vs. learned exploration
+# Learning-Based vs. Hand-Designed Exploration for Autonomous Search and Rescue
 
-An autonomous search-and-rescue rover built with ROS 2, Gazebo, Nav2, SLAM, RGB-D perception and reinforcement learning.
+### A 4WD differential-drive rover operating in GPS-denied environments with SLAM, semantic perception, Nav2 and PPO
 
-The main experiment compares a hand-designed frontier exploration policy, Mission 2, with a PPO policy. Both choose from the same candidate goals and use the same navigation stack.
+A 4WD differential-drive search-and-rescue rover designed for autonomous exploration in GPS-denied environments.
+
+The system combines LiDAR-based SLAM, RGB-D semantic perception, Nav2 navigation and a learned high-level PPO policy to select exploration and target-investigation goals.
+
+The main research experiment compares the learned policy against a hand-designed frontier exploration policy, Mission 2. Both policies receive the same candidate goals and use the same navigation and recovery stack.
 
 ## Demo
 
@@ -24,10 +28,15 @@ The main experiment compares a hand-designed frontier exploration policy, Missio
 
 ## Research question
 
-Can PPO choose exploration goals better than the hand-designed Mission 2 rule?
+Can a learned high-level exploration policy improve target-aware searchand rescue performance over a hand-designed frontier exploration policywhen both operate on the same candidate goals and navigation stack?
 
-The main metrics are target detection, target inspection, time, distance travelled and stuck events. Coverage is also recorded, but high coverage alone is not considered a successful SAR mission. Only the goal-selection step differs between the two policies.
+The comparison focuses on target discovery and inspection while limitingunnecessary travel, mission time and recovery events.
 
+The primary metrics are target detection, target inspection, time to firstdetection and inspection, distance travelled, stuck events and abandonedtargets. Map coverage is reported as a secondary metric rather than being treated as the sole measure of mission success.
+
+### Operating assumption
+
+The rover operates without GPS as a global positioning source. Localizationand navigation therefore rely on onboard sensing, including LiDAR-basedSLAM, wheel odometry and IMU fusion.
 ## System overview
 
 ```
