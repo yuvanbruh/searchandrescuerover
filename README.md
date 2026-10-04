@@ -7,7 +7,8 @@ The main experiment compares a hand-designed frontier exploration policy, Missio
 ## Demo
 
 <p align="center">
-  <video src="docs/demo.mp4" controls width="90%"></video>
+  <video src="https://github.com/user-attachments/assets/8fd30b4a-ade5-483c-b9b0-d97bcb02ba8d
+" controls width="90%"></video>
 </p>
 
 <p align="center">
