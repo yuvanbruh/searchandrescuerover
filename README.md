@@ -2,8 +2,6 @@
 
 ### A 4WD differential-drive rover operating in GPS-denied environments with SLAM, semantic perception, Nav2 and PPO
 
-A 4WD differential-drive search-and-rescue rover designed for autonomous exploration in GPS-denied environments.
-
 The system combines LiDAR-based SLAM, RGB-D semantic perception, Nav2 navigation and a learned high-level PPO policy to select exploration and target-investigation goals.
 
 The main research experiment compares the learned policy against a hand-designed frontier exploration policy, Mission 2. Both policies receive the same candidate goals and use the same navigation and recovery stack.
