@@ -1,8 +1,7 @@
-# Search and Rescue Rover: hand-designed vs. learned exploration
+# Search and Rescue Rover: Hand-Designed vs Learned Goal Selection for Autonomous Exploration
+An autonomous search and rescue rover built with ROS 2, Gazebo, Nav2, SLAM, RGB-D perception and reinforcement learning.
 
-An autonomous search-and-rescue rover built with ROS 2, Gazebo, Nav2, SLAM, RGB-D perception and reinforcement learning.
-
-The main experiment compares a hand-designed frontier exploration policy, Mission 2, with a PPO policy. Both choose from the same candidate goals and use the same navigation stack.
+The main experiment compares a hand designed frontier exploration policy, Mission 2, with a PPO policy. Both choose from the same candidate goals and use the same navigation stack.
 
 ## Demo
 
