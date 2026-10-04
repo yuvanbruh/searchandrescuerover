@@ -29,6 +29,11 @@ Can PPO choose exploration goals better than the hand-designed Mission 2 rule?
 The main metrics are target detection, target inspection, time, distance travelled and stuck events. Coverage is also recorded, but high coverage alone is not considered a successful SAR mission. Only the goal-selection step differs between the two policies.
 
 ## System overview
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/710d7015-3609-4235-b4d1-6534fb2d6836" width="90%">
+</p>
+
+
 
 ```
  LiDAR + RGB-D camera + IMU
