@@ -3,7 +3,7 @@ twist_mux:
     topics:
       navigation:
         topic   : nav_vel
-        timeout : 0.5
+        timeout : 2.0
         priority: 10
         stamped : true
 

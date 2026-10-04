@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
+
+  <!-- Two spot lights on the mast, one on each side of the camera.
+       Same 25 deg downward tilt as the camera. Needs mast_height (defined in mast/camera files).
+
+       FIX: the link now has an <inertial> block. Without it, the URDF->SDF converter
+       reports "link is not modeled in sdf", drops the link AND its joint, and the light
+       (which lives inside that link) silently disappears. -->
+
+  <xacro:macro name="headlight" params="name y">
+
+    <joint name="${name}_joint" type="fixed">
+      <parent link="mast_link"/>
+      <child link="${name}_link"/>
+      <origin xyz="0 ${y} ${mast_height}" rpy="0 0.436 0"/>
+    </joint>
+
+    <!-- keep this joint so the light is not merged away when URDF is converted to SDF -->
+    <gazebo reference="${name}_joint">
+      <preserveFixedJoint>true</preserveFixedJoint>
+    </gazebo>
+
+    <!-- small visual housing, no collision, sits well above the lidar scan plane -->
+    <link name="${name}_link">
+      <visual>
+        <geometry><box size="0.03 0.05 0.03"/></geometry>
+        <material name="white"/>
+      </visual>
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="0.01"/>
+        <inertia ixx="2e-6" ixy="0" ixz="0" iyy="2e-6" iyz="0" izz="2e-6"/>
+      </inertial>
+    </link>
+
+    <gazebo reference="${name}_link">
+      <light name="${name}" type="spot">
+        <pose>0.02 0 0 0 0 0</pose>
+        <cast_shadows>false</cast_shadows>
+        <diffuse>1.0 0.97 0.9 1</diffuse>
+        <specular>0.05 0.05 0.05 1</specular>
+        <intensity>1.5</intensity>
+
+        <!-- Hide Gazebo's green light visualization gizmo -->
+        <visualize>false</visualize>
+
+        <direction>1 0 0</direction>
+
+        <attenuation>
+          <range>8</range>
+          <constant>0.3</constant>
+          <linear>0.08</linear>
+          <quadratic>0.02</quadratic>
+        </attenuation>
+
+        <spot>
+          <inner_angle>0.5</inner_angle>
+          <outer_angle>1.3</outer_angle>
+          <falloff>1.0</falloff>
+        </spot>
+      </light>
+    </gazebo>
+
+  </xacro:macro>
+
+  <xacro:headlight name="headlight_left"  y="0.09"/>
+  <xacro:headlight name="headlight_right" y="-0.09"/>
+
+</robot>

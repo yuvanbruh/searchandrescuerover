@@ -174,13 +174,22 @@ def generate_launch_description():
 
     # gz spawn robot entity 
     node_gz_spawn_entity = Node(
-        package='ros_gz_sim',
-        executable='create',
-        output='screen',
-        arguments=['-topic', 'robot_description', 
-                '-name', 'minibot',
-                '-allow_renaming', 'true',
-                '-z', '0.1'],
+    package='ros_gz_sim',
+    executable='create',
+    output='screen',
+    arguments=[
+        '-topic', 'robot_description',
+        '-name', 'minibot',
+        '-allow_renaming', 'true',
+
+        # Spawn position
+        '-x', '0.5',
+        '-y', '6.0',
+        '-z', '0.1',
+
+        # Spawn orientation
+        '-Y', '0.0',
+    ],
     )
 
     # rviz2 node
@@ -278,5 +287,3 @@ def generate_launch_description():
 
     # Generate the launch description  
     return ld
-
-    

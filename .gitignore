@@ -1,28 +1,27 @@
-# ROS 2 generated files
-build/
-install/
-log/
+# ROS / colcon generated files
+**/build/
+**/install/
+**/log/
 
-# Runtime logs
-*.log
-*.txt
-
-# Python cache
+# Python
 __pycache__/
-*.pyc
-
-# IDE
-.vscode/
-.idea/
-
-# Environment files
-.env
-
-# Generated images
-snapshots/
-detections/
-*.jpg
-*.jpeg
-*.png
-
+*.py[cod]
 *.egg-info/
+
+# Local editor files
+.vscode/
+
+# Logs / runtime output
+*.log
+stuck_events.log
+stuck_logsss.txt
+stuck_secs.txt
+log.txt
+
+# Scratch files
+bus.jpg
+
+# Training outputs
+sar_training/runs/
+sar_training/policy_old/
+sar_training/policy_old.npz

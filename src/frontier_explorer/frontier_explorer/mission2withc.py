@@ -1,8 +1,10 @@
 
+
 import csv
 import math
 import os
 import re
+import shutil
 import time
 
 import numpy as np
@@ -16,7 +18,7 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseStamped, Point, PointStamped
 from nav2_msgs.action import NavigateToPose, ComputePathToPose, Spin
 from visualization_msgs.msg import Marker, MarkerArray
-from std_srvs.srv import Empty
+from nav2_msgs.srv import ClearEntireCostmap
 
 from semantic_interfaces.msg import SemanticTargetArray
 
@@ -104,7 +106,7 @@ class ExplorerNode(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
 
-        self.declare_parameter('explore_period_sec', 5.0)
+        self.declare_parameter('explore_period_sec', 3.0)
 
         self.declare_parameter('min_cluster_size', 4)
         self.declare_parameter('min_frontier_goal_distance_m', 0.75)
@@ -127,7 +129,7 @@ class ExplorerNode(Node):
         # MISSION 2
         # ============================================================
 
-        self.declare_parameter('target_class', 'bottle')
+        self.declare_parameter('target_class', 'person')
 
         # Noise floor only - NOT a "should we investigate" gate.
         # Filters obvious garbage (e.g. a single-frame hallucinated
@@ -172,7 +174,7 @@ class ExplorerNode(Node):
         self.declare_parameter('recovery_scan_topic', '/scan')
         self.declare_parameter('recovery_scan_sectors', 8)
         self.declare_parameter('recovery_sector_min_range_m', 0.12)
-        self.declare_parameter('recovery_sector_max_range_m', 3.0)
+        self.declare_parameter('recovery_sector_max_range_m', 6.0)
         self.declare_parameter('recovery_clearance_margin_m', 0.20)
 
         self.declare_parameter('initial_battery_pct', 100.0)
@@ -182,7 +184,7 @@ class ExplorerNode(Node):
         # SEMANTIC DATABASE
         # ============================================================
 
-        self.declare_parameter('semantic_targets_topic', '/explorer/semantic_targets')
+        self.declare_parameter('semantic_targets_topic', '/semantic_database')
         self.declare_parameter('mark_visited_topic', '/semantic_database/mark_visited')
 
         # ============================================================
@@ -368,6 +370,14 @@ class ExplorerNode(Node):
             self.run_dir, 'target_milestones.csv'
         )
 
+        self.detections_snapshot_dir = os.path.join(
+            self.run_dir, 'snapshots', 'detections'
+        )
+        self.inspected_snapshot_dir = os.path.join(
+            self.run_dir, 'snapshots', 'inspected'
+        )
+        os.makedirs(self.inspected_snapshot_dir, exist_ok=True)
+
         # Create all three CSV files immediately at launch.
         # This means even a Ctrl+C before the first decision still
         # leaves a complete run directory with valid CSV headers.
@@ -454,9 +464,9 @@ class ExplorerNode(Node):
         self.spin_client = ActionClient(self, Spin, 'spin')
 
         self.global_costmap_clear_client = self.create_client(
-            Empty, '/global_costmap/clear_entirely_global_costmap')
+            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
         self.local_costmap_clear_client = self.create_client(
-            Empty, '/local_costmap/clear_entirely_local_costmap')
+            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
 
         # ============================================================
         # PUBLISHERS
@@ -497,6 +507,18 @@ class ExplorerNode(Node):
         noise floor - see min_target_confidence.
         """
         self.semantic_targets = list(msg.targets)
+
+        self.get_logger().info(
+            f"[MISSION2 TARGET DB] Received {len(self.semantic_targets)} target(s)"
+        )
+
+        for t in self.semantic_targets:
+            self.get_logger().info(
+                f"[MISSION2 TARGET DB] "
+                f"id={t.id} class={t.class_name} "
+                f"conf={t.confidence:.2f} "
+                f"xy=({t.x:.2f}, {t.y:.2f})"
+            )
 
         matching_targets = [t for t in msg.targets if t.class_name == self.target_class]
         if not matching_targets:
@@ -690,67 +712,110 @@ class ExplorerNode(Node):
         self.get_logger().warning(
             f"Blacklisting frontier ({x:.2f}, {y:.2f}) for {self.blacklist_timeout_sec:.0f}s")
 
-    def pick_goal_cell(self, cluster, map_array, robot_r, robot_c):
+    def compute_unsafe_mask(self, map_array):
+        """
+        Precompute, once per cycle, which cells are unsafe because they
+        are within obstacle_margin_cells of an occupied cell.
 
+        This preserves the original is_cell_safe() box-window semantics
+        while avoiding repeated per-cell NumPy slicing inside
+        pick_goal_cell().
+        """
+        occupied = map_array >= self.occupied_threshold
+        m = self.obstacle_margin_cells
+
+        # Dilate along rows first.
+        row_dilated = occupied.copy()
+
+        for d in range(1, m + 1):
+            shifted_up = np.zeros_like(occupied)
+            shifted_up[:-d, :] = occupied[d:, :]
+
+            shifted_down = np.zeros_like(occupied)
+            shifted_down[d:, :] = occupied[:-d, :]
+
+            row_dilated |= shifted_up | shifted_down
+
+        # Dilate along columns.
+        full_dilated = row_dilated.copy()
+
+        for d in range(1, m + 1):
+            shifted_left = np.zeros_like(row_dilated)
+            shifted_left[:, :-d] = row_dilated[:, d:]
+
+            shifted_right = np.zeros_like(row_dilated)
+            shifted_right[:, d:] = row_dilated[:, :-d]
+
+            full_dilated |= shifted_left | shifted_right
+
+        return full_dilated
+
+    def pick_goal_cell(self, cluster, robot_r, robot_c, unsafe_mask):
         cells = cluster["cells"]
 
-        # 1. Prefer frontier cells that are sufficiently far
-        #    from the robot.
-        # Map resolution comes from the current OccupancyGrid.
         resolution = float(self.map_data.info.resolution)
 
-        # Minimum distance from robot, expressed in grid cells.
+        if resolution <= 0.0:
+            return None
+
         min_dist_cells = (
             self.min_frontier_goal_distance_m / resolution
         )
 
-        valid_cells = []
-
-        for r, c in cells:
-
-            dist = math.hypot(
-                r - robot_r,
-                c - robot_c
-            )
-
-            if dist < min_dist_cells:
-                continue
-
-            if not self.is_cell_safe(map_array, r, c):
-                continue
-
-            valid_cells.append((r, c))
-
-        if not valid_cells:
+        if not cells:
             return None
 
-        # 2. From the valid cells, choose the one closest
-        #    to the original cluster goal.
+        cells_arr = np.asarray(cells, dtype=np.int32)
+
+        rs = cells_arr[:, 0]
+        cs = cells_arr[:, 1]
+
+        dist = np.hypot(
+            rs - robot_r,
+            cs - robot_c
+        )
+
+        safe = ~unsafe_mask[rs, cs]
+
+        valid_mask = (
+            (dist >= min_dist_cells) &
+            safe
+        )
+
+        if not np.any(valid_mask):
+            return None
+
+        valid_rs = rs[valid_mask]
+        valid_cs = cs[valid_mask]
+
         original_r, original_c = cluster["goal_cell"]
 
-        return min(
-            valid_cells,
-            key=lambda cell: math.hypot(
-                cell[0] - original_r,
-                cell[1] - original_c
-            )
+        d2 = (
+            (valid_rs - original_r) ** 2 +
+            (valid_cs - original_c) ** 2
         )
+
+        best_idx = np.argmin(d2)
+
+        return (
+            int(valid_rs[best_idx]),
+            int(valid_cs[best_idx])
+        )
+
 
     def estimate_information_gain(self, map_array, r, c):
         """
-        Conservative, sensor-visible information gain.
+        Vectorized ray-cast information gain.
 
-        A LiDAR-like ray is cast from the candidate viewpoint through cells
-        that are already known free. The first unknown cell reached by each
-        ray is counted once. A ray stops at an occupied cell.
-
-        This deliberately does NOT count arbitrary unknown cells behind
-        walls/obstacles just because they happen to lie inside a square
-        around the frontier.
-
-        The result is therefore a visibility/frontier-gain measure, not a
-        theoretical count of all unknown map cells.
+        Preserves the original semantics:
+          - Cast num_rays rays from the candidate cell.
+          - Continue through known-free cells.
+          - Stop at the first occupied cell.
+          - Stop and count the first unknown cell.
+          - Stop when leaving the map.
+          - Count each visible unknown cell only once.
         """
+
         rows, cols = map_array.shape
         resolution = float(self.map_data.info.resolution)
 
@@ -762,53 +827,143 @@ class ExplorerNode(Node):
             int(self.info_gain_max_range_m / resolution)
         )
 
-        num_rays = max(36, int(self.info_gain_num_rays))
-        visible_unknown = set()
+        num_rays = max(
+            36,
+            int(self.info_gain_num_rays)
+        )
 
-        # Start from the center of the candidate cell.
+        # ---------------------------------------------------------
+        # Ray directions
+        # ---------------------------------------------------------
+
+        angles = (
+            2.0 * np.pi *
+            np.arange(num_rays, dtype=np.float64) /
+            num_rays
+        )
+
+        dx = np.cos(angles)
+        dy = np.sin(angles)
+
+        # ---------------------------------------------------------
+        # Sample distances along every ray
+        # ---------------------------------------------------------
+
+        steps = np.arange(
+            1,
+            max_steps + 1,
+            dtype=np.float64
+        )
+
+        # Candidate cell center
         x0 = c + 0.5
         y0 = r + 0.5
 
-        for ray_idx in range(num_rays):
-            angle = 2.0 * math.pi * ray_idx / num_rays
-            dx = math.cos(angle)
-            dy = math.sin(angle)
+        # Shape:
+        #   (num_rays, max_steps)
+        gx = x0 + dx[:, None] * steps[None, :]
+        gy = y0 + dy[:, None] * steps[None, :]
 
-            previous_cell = None
+        # Convert grid coordinates to map indices
+        cc = np.floor(gx).astype(np.int32)
+        rr = np.floor(gy).astype(np.int32)
 
-            for step in range(1, max_steps + 1):
-                gx = x0 + dx * step
-                gy = y0 + dy * step
+        # ---------------------------------------------------------
+        # Bounds
+        # ---------------------------------------------------------
 
-                rr = int(math.floor(gy))
-                cc = int(math.floor(gx))
+        in_bounds = (
+            (rr >= 0) &
+            (rr < rows) &
+            (cc >= 0) &
+            (cc < cols)
+        )
 
-                if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
-                    break
+        # Safe indices for NumPy indexing
+        rr_safe = np.clip(rr, 0, rows - 1)
+        cc_safe = np.clip(cc, 0, cols - 1)
 
-                cell = (rr, cc)
+        values = map_array[rr_safe, cc_safe]
 
-                # Avoid repeatedly processing the same grid cell caused by
-                # multiple sub-cell samples along a shallow ray.
-                if cell == previous_cell:
-                    continue
-                previous_cell = cell
+        # ---------------------------------------------------------
+        # Cell classification
+        # ---------------------------------------------------------
 
-                value = map_array[rr, cc]
+        occupied = (
+            (values >= self.occupied_threshold) &
+            in_bounds
+        )
 
-                if value >= self.occupied_threshold:
-                    # Known obstacle blocks this ray.
-                    break
+        unknown = (
+            (values == -1) &
+            in_bounds
+        )
 
-                if value == -1:
-                    # First unknown cell visible along this ray.
-                    visible_unknown.add(cell)
-                    break
+        out_of_bounds = ~in_bounds
 
-                # value == 0: known free -> continue the ray.
+        # Anything below stops the ray
+        stop_mask = (
+            occupied |
+            unknown |
+            out_of_bounds
+        )
 
-        return len(visible_unknown)
+        # ---------------------------------------------------------
+        # Find first stopping cell for every ray
+        # ---------------------------------------------------------
 
+        has_stop = stop_mask.any(axis=1)
+
+        first_stop = np.argmax(
+            stop_mask,
+            axis=1
+        )
+
+        # ---------------------------------------------------------
+        # Determine which rays stopped on UNKNOWN
+        # ---------------------------------------------------------
+
+        valid_rays = np.where(has_stop)[0]
+
+        if valid_rays.size == 0:
+            return 0
+
+        stop_indices = first_stop[valid_rays]
+
+        stopped_unknown = unknown[
+            valid_rays,
+            stop_indices
+        ]
+
+        unknown_rays = valid_rays[stopped_unknown]
+
+        if unknown_rays.size == 0:
+            return 0
+
+        unknown_steps = first_stop[unknown_rays]
+
+        unknown_rows = rr_safe[
+            unknown_rays,
+            unknown_steps
+        ]
+
+        unknown_cols = cc_safe[
+            unknown_rays,
+            unknown_steps
+        ]
+
+        # ---------------------------------------------------------
+        # Distinct unknown cells
+        # ---------------------------------------------------------
+
+        visible_unknown = np.unique(
+            np.column_stack(
+                (unknown_rows, unknown_cols)
+            ),
+            axis=0
+        )
+
+        return int(len(visible_unknown))
 
     # ================================================================
     # MAP COVERAGE
@@ -957,6 +1112,9 @@ class ExplorerNode(Node):
     def choose_frontier(self, clusters, map_array, robot_x, robot_y):
         robot_r, robot_c = self.world_to_grid(robot_x, robot_y)
 
+        # Compute obstacle safety once for the entire map/cycle.
+        unsafe_mask = self.compute_unsafe_mask(map_array)
+
         # Remove already explored / blacklisted frontier regions BEFORE
         # applying the top-15 cap. This prevents a large but unavailable
         # cluster from consuming one of the 15 evaluation slots.
@@ -982,16 +1140,12 @@ class ExplorerNode(Node):
             reverse=True
         )[:max_clusters_to_evaluate]
 
-        self.get_logger().info(
-            f"[FRONTIER DEBUG] Evaluating {len(clusters)} available clusters "
-            f"(from {len(available_clusters)} available / {len(available_clusters)} "
-            f"after visited+blacklist filtering) "
-            f"| robot=({robot_x:.2f}, {robot_y:.2f}) "
-            f"| robot_grid=({robot_r:.1f}, {robot_c:.1f})"
-        )
-
         ig_start = time.time()
         candidates = []
+
+        # Separate timing for goal-cell selection and vectorized IG.
+        pick_goal_time_ms = 0.0
+        ig_only_time_ms = 0.0
 
         # Debug counters ONLY — no behavior change
         rejected_no_goal = 0
@@ -1001,18 +1155,18 @@ class ExplorerNode(Node):
 
         for i, cluster in enumerate(clusters):
 
-            self.get_logger().info(
-                f"[FRONTIER DEBUG] Cluster {i}: "
-                f"size={cluster['size']} "
-                f"goal_cell={cluster['goal_cell']}"
-            )
+            pick_goal_start = time.time()
 
             goal_cell = self.pick_goal_cell(
                 cluster,
-                map_array,
                 robot_r,
-                robot_c
+                robot_c,
+                unsafe_mask
             )
+
+            pick_goal_time_ms += (
+                time.time() - pick_goal_start
+            ) * 1000.0
 
             if goal_cell is None:
                 rejected_no_goal += 1
@@ -1034,13 +1188,6 @@ class ExplorerNode(Node):
                 y - robot_y
             )
 
-            self.get_logger().info(
-                f"[FRONTIER DEBUG] Cluster {i}: "
-                f"selected goal cell=({r}, {c}) "
-                f"world=({x:.2f}, {y:.2f}) "
-                f"distance={distance_from_robot:.2f}m"
-            )
-
             if distance_from_robot < self.min_frontier_goal_distance_m:
                 rejected_too_close += 1
 
@@ -1052,16 +1199,17 @@ class ExplorerNode(Node):
                 )
                 continue
 
+            ig_only_start = time.time()
+
             info_gain = self.estimate_information_gain(
                 map_array,
                 r,
                 c
             )
 
-            self.get_logger().info(
-                f"[FRONTIER DEBUG] Cluster {i}: "
-                f"information_gain={info_gain}"
-            )
+            ig_only_time_ms += (
+                time.time() - ig_only_start
+            ) * 1000.0
 
             already_visited = self.is_already_visited(x, y)
             blacklisted = self.is_blacklisted(x, y)
@@ -1094,13 +1242,6 @@ class ExplorerNode(Node):
                 "info_gain": info_gain
             })
 
-            self.get_logger().info(
-                f"[FRONTIER DEBUG] Cluster {i} ACCEPTED: "
-                f"goal=({x:.2f}, {y:.2f}) "
-                f"size={cluster['size']} "
-                f"IG={info_gain}"
-            )
-
         ig_elapsed = time.time() - ig_start
         ig_elapsed_ms = ig_elapsed * 1000.0
 
@@ -1109,6 +1250,13 @@ class ExplorerNode(Node):
         self.get_logger().info(
             f"[TIMING] info-gain eval for {len(clusters)} clusters: "
             f"{ig_elapsed_ms:.1f} ms"
+        )
+
+        self.get_logger().info(
+            f"[TIMING] pick_goal_cell total: "
+            f"{pick_goal_time_ms:.1f} ms | "
+            f"estimate_information_gain total: "
+            f"{ig_only_time_ms:.1f} ms"
         )
 
         # ------------------------------------------------------------
@@ -1455,7 +1603,7 @@ class ExplorerNode(Node):
                 continue
 
             try:
-                client.call_async(Empty.Request())
+                client.call_async(ClearEntireCostmap.Request())
                 self.get_logger().info(f"Requested {name} clear.")
             except Exception as exc:
                 self.get_logger().warning(
@@ -1689,6 +1837,20 @@ class ExplorerNode(Node):
         )
 
     def has_unvisited_known_targets(self):
+        for t in self.semantic_targets:
+            available = self._target_is_available(t)
+
+            self.get_logger().info(
+                f"[TARGET AVAILABILITY] "
+                f"id={t.id} "
+                f"class={t.class_name} "
+                f"available={available} "
+                f"inspected={t.id in self.inspected_target_ids} "
+                f"abandoned={t.id in self.abandoned_target_ids} "
+                f"confidence={t.confidence:.2f} "
+                f"threshold={self.min_target_confidence:.2f}"
+            )
+
         return any(self._target_is_available(t) for t in self.semantic_targets)
 
     def _register_target_attempt_failure(self, target_id):
@@ -1709,62 +1871,215 @@ class ExplorerNode(Node):
     # DIRECT TARGET NAVIGATION
     # ================================================================
 
+    def compute_standoff_point(self, robot_x, robot_y, target_x, target_y):
+        """
+        Compute a navigation point offset from the exact semantic target
+        coordinate so Nav2 does not attempt to drive into the target's
+        collision geometry. The returned point remains within
+        visited_radius_m of the real target.
+        """
+        dx = target_x - robot_x
+        dy = target_y - robot_y
+        dist = math.hypot(dx, dy)
+
+        if dist <= self.visited_radius_m:
+            return robot_x, robot_y
+
+        # Stop at 65% of the inspection radius from the target. 0.9 left
+        # only ~0.08m of margin against xy_goal_tolerance (0.25m), so
+        # Nav2 could report goal-reached while still outside
+        # visited_radius_m and register a spurious failure.
+        standoff_dist = dist - (self.visited_radius_m * 0.65)
+        ratio = standoff_dist / dist
+
+        return (
+            robot_x + dx * ratio,
+            robot_y + dy * ratio
+        )
+
     def navigate_direct_to_target(self, robot_x, robot_y):
         """
-        Evaluate every known, uninspected, non-abandoned target above
-        the noise floor using the actual Nav2 planned path length,
-        then navigate to the reachable target with the shortest path.
+        Evaluate every known, available semantic target using the
+        actual Nav2 planned path length.
 
-        T* = argmin_i D_Nav2(i)
+        Select:
+            T* = argmin_i D_Nav2(i)
 
-        Euclidean distance is NOT used for target selection.
-        Confidence is NOT used for target selection (only as the
-        entry-level noise floor already applied in
-        _target_is_available).
+        Then navigate to that target.
+
+        Important:
+        - Euclidean distance is NOT used for selection.
+        - Confidence is only used by _target_is_available()
+          as the noise floor.
+        - The selection is recomputed after every inspected target.
+        - A target detected while another Nav2 goal is active does
+          NOT interrupt that active goal. It is handled on the next
+          decision cycle.
         """
-        candidates = [t for t in self.semantic_targets if self._target_is_available(t)]
+        self.get_logger().info(
+            f"[MISSION2 TARGET CHECK] "
+            f"semantic_targets={len(self.semantic_targets)}"
+        )
+
+        for t in self.semantic_targets:
+            self.get_logger().info(
+                f"[MISSION2 TARGET CHECK] "
+                f"id={t.id} class={t.class_name} "
+                f"inspected={t.id in self.inspected_target_ids} "
+                f"abandoned={t.id in self.abandoned_target_ids} "
+                f"confidence={t.confidence:.2f} "
+                f"xy=({t.x:.2f}, {t.y:.2f})"
+            )
+
+        candidates = [
+            t for t in self.semantic_targets
+            if self._target_is_available(t)
+        ]
 
         if not candidates:
+            self.is_direct_targeting = False
             return
 
-        # Prevent the main timer from starting another target-selection
+        # Prevent explore() from starting another target-selection
         # cycle while asynchronous Nav2 path requests are running.
         self.is_direct_targeting = True
 
         self.get_logger().info(
-            f"Evaluating {len(candidates)} uninspected target(s) using Nav2 path length...")
+            f"Evaluating {len(candidates)} uninspected target(s) "
+            f"using Nav2 path length..."
+        )
 
         results = []
         completed = 0
 
         def on_target_path(target, path_length):
             nonlocal completed
+
             completed += 1
 
             if path_length is not None and path_length > 0.0:
                 results.append((target, path_length))
-                self.get_logger().info(f"Target #{target.id}: Nav2 path = {path_length:.2f} m")
-            else:
-                self.get_logger().warning(f"Target #{target.id}: no reachable Nav2 path")
 
+                self.get_logger().info(
+                    f"Target #{target.id}: "
+                    f"Nav2 path = {path_length:.2f} m"
+                )
+            else:
+                self.get_logger().warning(
+                    f"Target #{target.id}: "
+                    f"no reachable Nav2 path"
+                )
+
+            # Wait until every candidate has been evaluated.
             if completed != len(candidates):
                 return
 
-        if not results:
+            # --------------------------------------------------------
+            # ALL TARGET PATHS HAVE NOW BEEN EVALUATED
+            # --------------------------------------------------------
+
             self.is_direct_targeting = False
 
-            # Register a failed investigation attempt for every target
-            # whose path evaluation failed, so unreachable targets cannot
-            # trap the mission in an endless retry loop.
-            for target_id in available_targets:
-                self._register_target_attempt_failure(target_id)
+            # No reachable target at all.
+            if not results:
+                self.get_logger().warning(
+                    "No reachable uninspected targets found. "
+                    "Registering failed attempt for each unreachable target."
+                )
 
-            self.get_logger().warning(
-                "No reachable uninspected targets found. "
-                "Registered failed attempt(s) for unreachable target(s)."
+                for target in candidates:
+                    self._register_target_attempt_failure(target.id)
+
+                return
+
+            # --------------------------------------------------------
+            # CHOOSE SHORTEST ACTUAL NAV2 PATH
+            # --------------------------------------------------------
+
+            best_target, best_path_length = min(
+                results,
+                key=lambda item: item[1]
             )
 
-            return
+            self.get_logger().info("==================================================")
+
+            self.get_logger().info(
+                f"TARGET SELECTION: "
+                f"#{best_target.id} "
+                f"({best_target.class_name})"
+            )
+
+            self.get_logger().info(
+                f"Selected Nav2 path length = "
+                f"{best_path_length:.2f} m"
+            )
+
+            # Print all reachable candidates for easy verification.
+            for target, path_length in sorted(
+                results,
+                key=lambda item: item[1]
+            ):
+                self.get_logger().info(
+                    f"  Target #{target.id}: "
+                    f"{path_length:.2f} m"
+                )
+
+            self.get_logger().info("==================================================")
+
+            # --------------------------------------------------------
+            # NAVIGATE TO THE SHORTEST TARGET
+            # --------------------------------------------------------
+
+            self.current_target_id = best_target.id
+
+            standoff_x, standoff_y = self.compute_standoff_point(
+                robot_x, robot_y, best_target.x, best_target.y
+            )
+
+            self.navigate_to(
+                standoff_x,
+                standoff_y,
+                best_path_length,
+                goal_type='target',
+                target_id=best_target.id
+            )
+
+        # ------------------------------------------------------------
+        # COMPUTE ACTUAL NAV2 PATH TO EVERY AVAILABLE TARGET
+        # ------------------------------------------------------------
+
+        for target in candidates:
+            standoff_x, standoff_y = self.compute_standoff_point(
+                robot_x, robot_y, target.x, target.y
+            )
+
+            self.get_path_length_async(
+                robot_x,
+                robot_y,
+                standoff_x,
+                standoff_y,
+                lambda length, t=target:
+                    on_target_path(t, length)
+            )
+
+
+    # ================================================================
+    # TARGET INSPECTION
+    # ================================================================
+
+    def mark_target_visited_if_reached(
+        self,
+        goal_x,
+        goal_y,
+        attempted_target_id
+    ):
+        """
+        Mark the selected semantic target as inspected only if the
+        rover is actually within visited_radius_m of that target.
+
+        This prevents Nav2 reaching a stale/bad target coordinate from
+        being counted as a successful inspection.
+        """
 
         target = next(
             (
@@ -1773,6 +2088,7 @@ class ExplorerNode(Node):
                     t.id == attempted_target_id
                     and t.class_name == self.target_class
                     and t.id not in self.inspected_target_ids
+                    and t.id not in self.abandoned_target_ids
                 )
             ),
             None
@@ -1781,10 +2097,12 @@ class ExplorerNode(Node):
         if target is None:
             self.get_logger().warning(
                 f"Selected target #{attempted_target_id} "
-                "is no longer available in the semantic database."
+                f"is no longer available in the semantic database."
             )
             return False
 
+        # Actual distance from the reached Nav2 goal position
+        # to the semantic target position.
         distance = math.hypot(
             goal_x - target.x,
             goal_y - target.y
@@ -1798,36 +2116,93 @@ class ExplorerNode(Node):
             )
             return False
 
+        if not target.has_snapshot:
+            self.get_logger().warning(
+                f"Selected target #{target.id} reached (distance={distance:.2f} m) "
+                f"but no snapshot confirmed yet — not marking inspected."
+            )
+            return False
+
+        # ------------------------------------------------------------
+        # TARGET SUCCESSFULLY INSPECTED
+        # ------------------------------------------------------------
+
         msg = PointStamped()
         msg.header.frame_id = self.map_frame
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.point.x = target.x
         msg.point.y = target.y
         msg.point.z = 0.0
+
         self.mark_visited_pub.publish(msg)
 
         self.targets_found_count += 1
         self.inspected_target_ids.add(target.id)
 
-        inspection_time = time.time() - self.experiment_start_time
+        snapshot_path = getattr(target, 'snapshot_path', "")
+        if snapshot_path and os.path.isfile(snapshot_path):
+            dst = os.path.join(
+                self.inspected_snapshot_dir,
+                f"target{target.id}_{target.class_name}.jpg"
+            )
+            try:
+                shutil.copy(snapshot_path, dst)
+                self.get_logger().info(f"Copied inspection snapshot: {dst}")
+            except Exception as exc:
+                self.get_logger().warning(
+                    f"Could not copy snapshot for target #{target.id}: {exc}"
+                )
+        else:
+            self.get_logger().warning(
+                f"No snapshot_path recorded for inspected target #{target.id} "
+                f"— cannot copy its photo."
+            )
+
+        inspection_time = (
+            time.time() - self.experiment_start_time
+        )
+
         count = len(self.inspected_target_ids)
+
         self.targets_inspected_count = count
 
-        if count == 1 and self.first_target_inspection_time_sec is None:
+        if (
+            count == 1
+            and self.first_target_inspection_time_sec is None
+        ):
             self.first_target_inspection_time_sec = inspection_time
 
         self.inspection_milestone_times[count] = inspection_time
-        self.save_inspection_milestone(count, inspection_time)
+        self.save_inspection_milestone(
+            count,
+            inspection_time
+        )
 
         self.get_logger().info("==================================================")
+
         self.get_logger().info(
-            f"TARGET INSPECTED: {target.class_name} #{target.id}"
+            f"TARGET INSPECTED: "
+            f"{target.class_name} #{target.id}"
         )
+
         self.get_logger().info(
-            f"Distance to selected target = {distance:.2f} m"
+            f"Distance to selected target = "
+            f"{distance:.2f} m"
         )
-        self.get_logger().info(f"Inspected count = {count}")
-        self.get_logger().info("Decision: RESUME EXPLORATION")
+
+        self.get_logger().info(
+            f"Inspected count = {count}"
+        )
+
+        self.get_logger().info(
+            "Target inspection complete."
+        )
+
+        self.get_logger().info(
+            "Next decision cycle will re-evaluate "
+            "remaining semantic targets."
+        )
+
         self.get_logger().info("==================================================")
 
         return True
@@ -1861,14 +2236,17 @@ class ExplorerNode(Node):
             else:
                 self.get_logger().warning(f"Navigation failed with status {status}")
 
-                if goal_type == 'frontier':
-                    self.blacklist_point(x, y)
-                elif goal_type == 'target':
-                    self._register_target_attempt_failure(target_id)
-
-                # If the watchdog already cancelled this goal because the
-                # rover was stuck, do not launch a second recovery spin.
+                # If the watchdog already cancelled this goal because the rover
+                # was stuck, _handle_stuck_navigation() already registered the
+                # failure/blacklist entry and triggered recovery. Registering it
+                # again here would double-count a single stuck event as two
+                # failed attempts.
                 if not self.goal_cancelled_for_recovery:
+                    if goal_type == 'frontier':
+                        self.blacklist_point(x, y)
+                    elif goal_type == 'target':
+                        self._register_target_attempt_failure(target_id)
+
                     self.trigger_recovery_spin()
 
         except Exception as e:
