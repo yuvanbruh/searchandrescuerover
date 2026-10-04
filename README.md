@@ -4,14 +4,23 @@ An autonomous search-and-rescue rover built with ROS 2, Gazebo, Nav2, SLAM, RGB-
 
 The main experiment compares a hand-designed frontier exploration policy, Mission 2, with a PPO policy. Both choose from the same candidate goals and use the same navigation stack.
 
-**Status: work in progress.** The rover, perception pipeline, simulator and PPO deployment in Gazebo are working. The first 20-minute Gazebo run for each policy is complete. More repeated runs are needed before making a statistical comparison.
-
 ## Demo
 
 <p align="center">
-  <img src="docs/images/rviz_slam_map_96pct.png" width="70%">
+  <video src="docs/demo.mp4" controls width="90%"></video>
 </p>
-<p align="center"><em>Occupancy map built by SLAM Toolbox during a Gazebo run (about 96% coverage), shown in RViz. The building has a west entrance, a central corridor, six rooms and clutter boxes.</em></p>
+
+<p align="center">
+  <em>Autonomous search-and-rescue rover exploring a low-visibility environment, detecting targets and navigating using ROS 2, SLAM and Nav2.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/final_sar_environment.png" width="90%">
+</p>
+
+<p align="center">
+  <em>Final low-visibility search-and-rescue environment used for the demonstration.</em>
+</p>
 
 ## Research question
 
@@ -57,6 +66,41 @@ Everything below the goal selection (Nav2, stuck watchdog, LiDAR-directed recove
 | Navigation | Nav2: Smac 2D planner, MPPI controller (`vx_max` is 0.7 m/s in the shipped config; experiments were run at 0.5 and 0.7 m/s) |
 | Perception | Ultralytics YOLO (`yolo26n`, PyTorch and an OpenVINO export are included) with ByteTrack tracking and depth-based localisation, `semantic_perception` package |
 | Learning | PyTorch (training), NumPy (inference inside ROS) |
+
+## Robot development
+
+The rover went through several iterations during development. The initial
+configuration used a smaller chassis and a low-mounted camera. This caused
+problems when navigating around low obstacles and gave the RGB camera a poor
+viewpoint for target detection.
+
+The final configuration uses a larger rover body with RGB-D sensing and a
+mast-mounted camera to improve both local obstacle perception and target
+detection.
+
+<p align="center">
+  <img src="docs/images/initial_rover.png" width="42%">
+  <img src="docs/images/final_rover.png" width="52%">
+</p>
+
+<p align="center">
+  <em>Initial rover configuration (left) and final rover configuration with mast-mounted sensing (right).</em>
+</p>
+
+### Early perception experiments
+
+Early testing exposed limitations in the original camera placement. The
+low-mounted camera could detect objects, but its viewpoint was not suitable
+for the final search-and-rescue configuration.
+
+<p align="center">
+  <img src="docs/images/early_camera.png" width="48%">
+  <img src="docs/images/early_yolo.png" width="48%">
+</p>
+
+<p align="center">
+  <em>Early low-mounted camera view (left) and YOLO detection during initial perception testing (right).</em>
+</p>
 
 ### Perception and inspection
 
@@ -126,6 +170,19 @@ Implemented in `sar_training/sar_rl/policy.py` and trained with `sar_training/tr
 - The checkpoint evaluated below (`run16_baseline`, exported as `sar_training/policy16.npz`) was trained from scratch for 800,000 decisions with the default reward weights.
 
 For deployment the policy is exported to a `.npz` file and run with NumPy inside the ROS node (`sar_training/gazebo_deploy/`), so PyTorch is not needed on the robot.
+
+## Autonomous exploration
+
+The rover builds an occupancy map with SLAM Toolbox while navigating the
+environment and selecting new exploration goals.
+
+<p align="center">
+  <img src="docs/images/rviz_slam_map_96pct.png" width="80%">
+</p>
+
+<p align="center">
+  <em>RViz occupancy map produced during an autonomous exploration run, reaching about 96% map coverage.</em>
+</p>
 
 ## 2D simulation environment
 
@@ -291,6 +348,22 @@ Worlds are in `src/minibot/worlds/`. The two main worlds share the same building
 | `gazebo1.sdf` (same as `underground.sdf`) | Same building with floor zones, puddles, debris, grime, fog layers and smoke (low visibility) |
 | `baseline1.sdf` to `baseline3.sdf` | Earlier worlds (empty, generated maze, first building version) |
 
+### Environment development
+
+The simulation environment was progressively expanded during development.
+Early environments were used to validate the robot, sensing and navigation
+stack. Later environments introduced more complex layouts and finally
+low-visibility conditions for search-and-rescue testing.
+
+<p align="center">
+  <img src="docs/images/environment_initial.png" width="48%">
+  <img src="docs/images/environment_complex.png" width="48%">
+</p>
+
+<p align="center">
+  <em>Initial clean environment (left) and a more complex exploration layout (right).</em>
+</p>
+
 ## Repository structure
 
 ```
@@ -307,6 +380,7 @@ sar_training/
   gazebo_deploy/       Export script, NumPy policy, RL explorer node, launch file
   policy16.npz         Exported PPO policy (run16_baseline)
 docs/images/           Figures used in this README
+docs/demo.mp4          Demo video
 yolo_ros/              Third-party ROS 2 YOLO wrapper (see Credits)
 behavior_trees/        Nav2 behavior tree
 yolo26n_openvino_model/ , *.pt   YOLO weights
