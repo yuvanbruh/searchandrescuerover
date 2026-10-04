@@ -1,307 +1,659 @@
-# Search and Rescue Rover: hand-designed vs. learned exploration
+# Search and Rescue Rover
 
-This repository contains the simulation and ROS 2 code used to study high-level exploration for an autonomous search-and-rescue rover. The main experiment compares a hand-designed frontier exploration policy ("Mission 2") with a PPO policy, both choosing from the same candidate goals and both executed by the same Nav2 stack.
+An autonomous search-and-rescue rover for exploration, target detection, navigation and high-level goal selection.
 
-**Status: work in progress.** The simulation pipeline and the Gazebo deployment are working. The PPO policy trained so far does not clearly outperform the hand-designed policy in the 2D simulator and has not yet been evaluated in Gazebo. See [Results](#results) and [Limitations](#limitations-and-current-work).
+The project combines ROS 2, SLAM, EKF state estimation, Nav2, LiDAR, RGB-D perception and YOLO-based target detection. The main research experiment studies whether a learned PPO policy can select exploration goals more effectively than a hand-designed frontier exploration policy.
 
-<!-- ADD: main demo video (Gazebo + RViz, rover exploring and inspecting people) -->
-<!-- ADD: Gazebo / RViz screenshots -->
-<!-- ADD: YOLO detection image -->
+**Status: ongoing research project.**
+
+The complete navigation and perception stack is operational in Gazebo. PPO has been trained in a fast 2D simulator and deployed into the ROS 2/Gazebo system. Current simulator experiments do not show an overall advantage for PPO over the hand-designed policy, while representative Gazebo runs show differences in exploration behaviour that are being investigated with repeated matched experiments.
+
+---
 
 ## Demo
 
-*Media to be added.*
+### Autonomous exploration in a low-visibility environment
+
+<p align="center">
+  <video src="docs/media/sar_demo.mp4" controls width="90%">
+    Your browser does not support embedded video.
+  </video>
+</p>
+
+The rover uses LiDAR for mapping and navigation, RGB-D perception for target localisation, and Nav2 for local and global motion control. The low-visibility environment is used as a robustness and demonstration scenario; the clean building is used for the main controlled experiments.
+
+### System view
+
+<p align="center">
+  <img src="docs/media/gazebo_rviz.png" width="90%">
+</p>
+
+Gazebo simulation and the corresponding SLAM/navigation map in RViz.
+
+### Exploration result
+
+<p align="center">
+  <img src="docs/media/ppo_09696_map.png" width="90%">
+</p>
+
+Representative PPO Gazebo run at 0.7 m/s: 96.96% final map coverage, 10 target detections and 5 inspected targets.
+
+---
 
 ## Research question
 
-Can a learned high-level policy (PPO) choose exploration goals better than a hand-designed frontier-utility rule, when both are given the same feasible candidate goals and the same low-level navigation?
+The main question is:
 
-"Better" here means finding and inspecting more of the people in the environment, sooner, with less driving and fewer stuck events. Only the goal-selection step differs between the two policies.
+> **Can a learned high-level policy choose exploration goals better than a hand-designed frontier-utility rule when both are given the same feasible candidate goals and the same low-level navigation stack?**
+
+The comparison is deliberately limited to the goal-selection layer.
+
+Both policies receive the same candidate set and use the same:
+
+- SLAM map
+- robot state estimate
+- target database
+- Nav2 planner/controller
+- stuck watchdog
+- recovery behaviour
+- target inspection pipeline
+- result logging
+
+The main measures are target inspection, time, distance and recovery behaviour. Coverage is reported as a secondary measure rather than treating complete map coverage as the objective by itself.
+
+---
 
 ## System overview
 
-```
- LiDAR + RGB-D + IMU
-        |
-   SLAM Toolbox  +  EKF  ->  occupancy map, robot pose
-        |
-   YOLO detector -> semantic database (person entries with map coordinates)
-        |
-   Candidate generator (shared)
-        |   8 frontier candidates + up to 8 target candidates
-        |
-   +----+---------------------+
-   |                          |
- Mission 2 rule             PPO policy
- (hand-designed)            (learned)
-   |                          |
-   +----------+---------------+
-              |
-        goal pose -> Nav2 (MPPI controller) -> rover
-```
+```text
+                 LiDAR + RGB-D + IMU
+                          |
+                          v
+                SLAM Toolbox + EKF
+                          |
+                occupancy map + pose
+                          |
+             +------------+-------------+
+             |                          |
+             v                          v
+       Frontier generation        YOLO perception
+             |                          |
+             |                    semantic database
+             |                          |
+             +------------+-------------+
+                          |
+                  Shared candidate set
+                          |
+                8 frontier candidates
+                + up to 8 target candidates
+                          |
+             +------------+-------------+
+             |                          |
+             v                          v
+        Mission 2 rule             PPO policy
+       hand-designed                learned
+             |                          |
+             +------------+-------------+
+                          |
+                       goal pose
+                          |
+                          v
+                  Nav2 / MPPI
+                          |
+                          v
+                       Rover
 
-Everything below the goal selection (Nav2, stuck watchdog, LiDAR-directed recovery, perception, target inspection, result logging) is shared and unchanged between the two policies.
+The candidate-generation and navigation layers are shared. The experiment changes the policy that chooses the next goal.
+Robot and software stack
+Component	Implementation
+Platform	4-wheel differential-drive rover
+OS	Ubuntu 24.04
+Middleware	ROS 2 Jazzy
+Simulator	Gazebo
+Drive	ros2_control, differential-drive controller, twist_mux
+LiDAR	2D LiDAR, 360 samples, 10 m range
+Camera	Mast-mounted RGB-D camera
+IMU	Wheel odometry + IMU fusion
+State estimation	robot_localization EKF
+Mapping	SLAM Toolbox, 0.05 m resolution
+Navigation	Nav2 with MPPI
+Perception	Ultralytics YOLO with tracking and depth-based localisation
+Target representation	Semantic target database
+RL training	PyTorch
+RL deployment	NumPy policy inside ROS 2
 
-## Robot and software stack
 
-| Component | Details |
-|---|---|
-| Platform | 4-wheel differential-drive rover, URDF/xacro in `src/minibot` |
-| OS / middleware | Ubuntu 24.04, ROS 2 Jazzy |
-| Simulator | Gazebo (the default pairing for Jazzy), `ros_gz` bridge |
-| Drive | `ros2_control` `diff_drive_controller`, `twist_mux` |
-| Sensors | 2D LiDAR (360 samples, 10 m), RGB-D camera on a mast, IMU, two mast-mounted spot lights |
-| State estimation | `robot_localization` EKF (wheel odometry + IMU) |
-| Mapping | SLAM Toolbox, online asynchronous mapping, 0.05 m resolution |
-| Navigation | Nav2 with the MPPI controller |
-| Perception | Ultralytics YOLO (OpenVINO export) with tracking and depth-based 3D localisation, `semantic_perception` package |
-| Learning | PyTorch (training), NumPy (inference inside ROS) |
+The mast-mounted RGB-D camera was introduced after early experiments showed that a low-mounted camera was poorly suited to observing low-lying objects and scene structure.
+Exploration methods
+Mission 2
+The original hand-designed exploration policy is implemented in:
+src/frontier_explorer/frontier_explorer/mission2.py
 
-## Exploration methods
+The policy first handles known, uninspected targets and otherwise selects a frontier using an information-gain/travel-cost utility.
+For frontier exploration:
+U = alpha * IG_norm - beta_eff * Cost_norm
 
-### Mission 2 (hand-designed baseline)
+with:
+alpha = 3.0
+beta  = 0.25
 
-Implemented in `src/frontier_explorer/frontier_explorer/mission2.py`.
+The effective travel-cost weight increases as the simulated battery model drains.
+Information gain is estimated from visible unknown cells along LiDAR-like rays, while travel cost comes from the Nav2 path.
+The policy also includes:
+- visited frontier filtering
+- temporary frontier blacklisting
+- target retry limits
+- unreachable-target abandonment
+- stuck detection
+- recovery behaviour
+- mission completion logic
+Shared candidate generation
+The PPO policy does not receive an entirely different exploration problem.
+Both policies receive the same candidate set.
+The candidate generator:
+1. clusters frontier cells
+2. removes visited and temporarily blacklisted clusters
+3. selects the largest frontier clusters
+4. computes safe goal cells
+5. estimates information gain
+6. keeps the eight highest-information frontier candidates
+7. generates stand-off points for available targets
+8. keeps up to eight target candidates with the shortest Nav2 paths
+This produces a maximum 16-action space:
+8 frontier candidates
++
+8 target candidates
+=
+16 possible actions
 
-1. If there are known, uninspected, non-abandoned `person` targets above a low confidence floor (0.10), go to the one with the shortest Nav2 path and inspect it.
-2. Otherwise explore: score each frontier candidate with
+Invalid candidates are masked.
+This makes the comparison:
+Same candidates
+      |
+      +---- Mission 2 utility rule
+      |
+      +---- PPO policy
+      |
+      v
+Same Nav2 stack
 
-   `U = alpha * IG_norm - beta_eff * Cost_norm`
+rather than comparing two completely different exploration systems.
+PPO policy
+The PPO implementation is in:
+sar_training/sar_rl/policy.py
+sar_training/train_ppo.py
 
-   with `alpha = 3.0`, `beta = 0.25` (scaled up as the battery model drains), `IG_norm` the visible-unknown-cell count from 180 LiDAR-like rays (10 m range) divided by the ray count, and `Cost_norm` the Nav2 path length divided by the longest candidate path. Go to the highest-scoring frontier.
-3. A target that cannot be reached or confirmed after 2 attempts is abandoned. A frontier that causes a stuck event is blacklisted for 30 s. The mission ends after 3 consecutive cycles with no frontier or target left.
+The policy uses a shared candidate encoder followed by self-attention layers so that candidate decisions can be made in the context of the other available options.
+Each candidate contains 13 features including:
+- target/frontier type
+- Nav2 path length
+- relative path cost
+- visible information gain
+- frontier cluster size
+- robot-relative position
+- target confidence
+- failed attempts
+- goal clearance
+- minimum path clearance
+- target offset
+- distance from previously selected goals
+Global state contains information such as:
+- known free area
+- number of frontier candidates
+- battery state
+- elapsed time
+- available targets
+- inspected targets
+- abandoned targets
+- stuck events
+- decision count
+- empty cycles
+The reward is task-oriented. It rewards target inspection and useful exploration while penalising time, distance, stuck events and abandoned targets.
+The main checkpoint used in the current experiments:
+run16_baseline
+800,000 training decisions
 
-### Shared candidate generation
+The trained PyTorch policy is exported to:
+sar_training/policy16.npz
 
-Both policies receive the same candidate set, built as in Mission 2 (with the target list capped at 8):
+and the ROS deployment uses the NumPy representation rather than requiring PyTorch at runtime.
+2D simulation
+Training directly in Gazebo is too slow for large numbers of PPO episodes. A fast simulator was therefore built under:
+sar_training/sar_rl/
 
-- Frontier cells are clustered; visited and blacklisted clusters are dropped.
-- The 15 largest clusters get a safe goal cell (obstacle margin) and an information-gain estimate.
-- The 8 with the highest information gain become the frontier candidates.
-- Every available target gets a stand-off point near it; the 8 with the shortest Nav2 path become the target candidates.
-
-This gives a 16-slot action space (8 frontier + 8 target, masked when empty).
-
-### PPO policy
-
-Implemented in `sar_training/sar_rl/policy.py` and trained with `sar_training/train_ppo.py`.
-
-- A shared encoder scores every candidate; two self-attention layers let the candidates see each other; a masked softmax picks one.
-- Input per candidate (13 numbers): target flag, Nav2 path length (absolute and relative), visible information gain, cluster size, offset to the robot (x, y), target confidence, failed attempts, clearance at the goal, minimum clearance along the path, target offset from free space, distance to previously chosen goals.
-- Global input (10 numbers): known free area, number of frontier candidates, battery, elapsed time, available targets, inspected / abandoned counts, stuck events, decisions so far, empty cycles.
-- The reward is task-based: positive for each person inspected (more if early) and for map coverage gained; penalties for time, distance, stuck events and abandoned targets. No Mission 2 utility formula is used anywhere in training.
-- The checkpoint evaluated below (`run16_baseline`) was trained from scratch for 800,000 decisions with the default reward weights.
-
-For deployment the policy is exported to a `.npz` file and run with NumPy inside the ROS node (`sar_training/gazebo_deploy/`), so PyTorch is not needed on the robot.
-
-## 2D simulation environment
-
-Training in Gazebo would take months (one mission takes tens of minutes), so the policy is trained in a fast 2D simulator, `sar_training/sar_rl/`. One simulator step is one goal decision.
-
-- **Copied from the Mission 2 node:** frontier detection and clustering, goal-cell safety filter, information-gain ray casting, visited/blacklist logic, target availability rules, stand-off point, completion rule.
-- **Approximated:** Nav2 (Dijkstra on the known map), stuck events (probability grows with path/goal narrowness), YOLO (range, field of view, line of sight, localisation noise, duplicate and false detections, snapshot failures), driving speed and timing. These are randomised each episode.
-- **Maps:** an exact replica of the Gazebo building (`sar_building_v2`) plus procedurally generated corridor-and-room layouts. Training uses the generated layouts; the replica is kept for testing.
-- **Calibration:** `CALIBRATED` in `sar_env.py` tunes the physics to one real Gazebo Mission 2 run (about 2000 s, about 13 stuck events, 15 database entries for 6 people). Note that the results below were produced with the default (uncalibrated, easier) simulator configuration, not `CALIBRATED`.
-
+One simulator step corresponds to one high-level exploration decision.
+What is shared with Mission 2
+The simulator reproduces the main decision-making logic:
+- frontier detection
+- frontier clustering
+- safe goal-cell selection
+- information-gain estimation
+- visited/blacklisted frontiers
+- target availability
+- target stand-off points
+- completion logic
+What is approximated
+The following Gazebo components are represented statistically:
+- Nav2 path planning
+- driving time
+- stuck events
+- YOLO detection
+- field of view
+- line of sight
+- localisation noise
+- duplicate detections
+- false detections
+- snapshot failures
+The simulator contains both a replica of the main Gazebo building and procedurally generated corridor/room layouts.
 <p align="center">
   <img src="sar_training/sim_v2_mission2_like.png" width="48%">
   <img src="sar_training/sim_random_mission2_like.png" width="48%">
 </p>
-<p align="center"><em>Simulator: the Gazebo building replica (left) and a generated layout (right).</em></p>
 
-**Metrics** (same names as the ROS result files where possible): mission time, distance traveled, final coverage, people inspected (ground truth), stuck events, abandoned database entries, completion.
+<p align="center">
+  <em>Example simulator environments: building replica and generated layout.</em>
+</p>
 
-## Results
+The simulator also contains a calibrated configuration based on a real Gazebo Mission 2 run. The results below, however, were produced with the default simulator configuration rather than the calibrated configuration.
+Simulator results
+The main PPO evaluation used 50 paired episodes per condition, with the same random seeds for both policies.
+Values are mean ± standard deviation.
+Building replica — nominal physics
+Metric	Mission 2	PPO
+Mission time (s)	613 ± 116	730 ± 223
+Distance (m)	104 ± 20	135 ± 39
+Coverage (%)	99.99	99.96
+People inspected	4.98 ± 0.8	5.44 ± 0.8
+Stuck events	4.44 ± 1.9	4.52 ± 2.7
+Abandoned entries	2.14 ± 1.3	2.58 ± 1.9
 
-### Simulator: Mission 2 rule vs. PPO (`run16_baseline`)
 
-50 paired episodes per setting (same seeds for both policies), default (uncalibrated) simulator configuration. Values are mean ± standard deviation. People inspected is out of 6 in the building layout (6.18 on average in the generated layouts).
+PPO inspected slightly more people, but required more time and distance.
+Building replica — randomized physics
+Metric	Mission 2	PPO
+Mission time (s)	677 ± 211	759 ± 243
+Distance (m)	117 ± 29	138 ± 35
+Coverage (%)	99.81	100.00
+People inspected	4.90 ± 1.0	5.22 ± 1.0
+Stuck events	4.34 ± 3.1	4.60 ± 3.2
+Abandoned entries	3.24 ± 2.7	3.72 ± 2.5
 
-**Building replica, nominal physics**
 
-| | Mission 2 rule | PPO |
-|---|---|---|
-| Mission time (s) | 613 ± 116 | 730 ± 223 |
-| Distance (m) | 104 ± 20 | 135 ± 39 |
-| Coverage (%) | 99.99 | 99.96 |
-| People inspected | 4.98 ± 0.8 | 5.44 ± 0.8 |
-| Stuck events | 4.44 ± 1.9 | 4.52 ± 2.7 |
-| Abandoned entries | 2.14 ± 1.3 | 2.58 ± 1.9 |
+Again, PPO achieved slightly higher inspection and coverage, but at a higher time and distance cost.
+Generated layouts — randomized physics
+Metric	Mission 2	PPO
+Mission time (s)	862 ± 314	1076 ± 389
+Distance (m)	168 ± 59	216 ± 79
+Coverage (%)	97.44	97.57
+People inspected	5.20 ± 2.4	5.44 ± 2.3
+Stuck events	4.54 ± 2.4	6.14 ± 3.3
+Abandoned entries	4.14 ± 2.8	4.96 ± 3.0
 
-**Building replica, randomised physics**
 
-| | Mission 2 rule | PPO |
-|---|---|---|
-| Mission time (s) | 677 ± 211 | 759 ± 243 |
-| Distance (m) | 117 ± 29 | 138 ± 35 |
-| Coverage (%) | 99.81 | 100.00 |
-| People inspected | 4.90 ± 1.0 | 5.22 ± 1.0 |
-| Stuck events | 4.34 ± 3.1 | 4.60 ± 3.2 |
-| Abandoned entries | 3.24 ± 2.7 | 3.72 ± 2.5 |
+Current interpretation
+The current PPO policy does not outperform Mission 2 overall.
+It tends to inspect slightly more targets, but takes longer, drives farther and can experience more stuck events.
+This behaviour is consistent with the reward configuration used for run16_baseline, which placed relatively little penalty on time and distance.
+That result is kept as part of the experiment rather than treating it as a failure to be hidden. The next experiment is to retrain on the calibrated simulator with stronger penalties for inefficient travel and recovery events.
+Gazebo experiments
+The PPO policy was subsequently deployed into the full ROS 2/Gazebo system.
+The deployment node supports three modes:
+Mode	Description
+mission2	Original Mission 2 node
+mission2c	Mission 2 decision rule using the shared candidate set
+rl	PPO selecting from the shared candidate set
 
-**Generated layouts, randomised physics**
 
-| | Mission 2 rule | PPO |
-|---|---|---|
-| Mission time (s) | 862 ± 314 | 1076 ± 389 |
-| Distance (m) | 168 ± 59 | 216 ± 79 |
-| Coverage (%) | 97.44 | 97.57 |
-| People inspected | 5.20 ± 2.4 | 5.44 ± 2.3 |
-| Stuck events | 4.54 ± 2.4 | 6.14 ± 3.3 |
-| Abandoned entries | 4.14 ± 2.8 | 4.96 ± 3.0 |
+The deployment architecture therefore allows the same perception, navigation and recovery stack to be used for all three modes.
+Each experiment records:
+experiment_summary.csv
+frontier_decisions.csv
+target_milestones.csv
+rl_decisions.csv
+rl_candidates.csv
+rl_globals.csv
 
-In the simulator this PPO policy inspects slightly more people than the Mission 2 rule, but takes longer and drives farther, and it has the same or more stuck events. It does not outperform the hand-designed policy overall. The training reward at that stage charged very little for time and distance, which is consistent with this behaviour. A second run with a stronger time/distance/stuck penalty on the calibrated simulator is planned.
+The RL-specific logs allow the selected candidate to be examined together with the alternatives that were available at each decision.
+Representative Gazebo results
+These are individual runs, not statistical averages.
+They are useful for showing system behaviour but should not be interpreted as the final quantitative comparison.
+PPO — 0.7 m/s
+Metric	Result
+Runtime	1212.77 s
+Distance	49.91 m
+Final coverage	96.96%
+Targets detected	10
+Targets inspected	5
+Targets abandoned	2
+First detection	74.84 s
+First inspection	109.71 s
+High-level decisions	33
 
-### Gazebo: Mission 2 reference run
 
-One run of the original Mission 2 node in Gazebo (single run, so treat it as an example, not an average):
+<p align="center">
+  <img src="docs/media/ppo_09696_map.png" width="90%">
+</p>
 
-| Metric | Value |
-|---|---|
-| Runtime | 1999.8 s (33.3 min) |
-| Distance traveled (sum of planned path lengths of reached goals) | 93.5 m |
-| Final map coverage | 97.35 % |
-| Target entries detected / inspected / abandoned | 15 / 11 / 4 |
-| First detection / first inspection | 24.8 s / 51.8 s |
-| Stuck events (watchdog) | 13 |
-| Average decision latency | 186 ms |
+Mission 2 — 0.7 m/s
+A representative Mission 2 run under the same nominal speed:
+Metric	Mission 2
+Runtime	1211.96 s
+Distance	48.39 m
+Final coverage	85.69%
+Targets detected	9
+Targets inspected	6
+Targets abandoned	3
+First detection	38.87 s
+First inspection	79.45 s
 
-"Targets" are semantic-database entries, which can include duplicate and false detections. The Gazebo worlds contain 6 people.
 
-### Gazebo: PPO vs. Mission 2
+PPO vs Mission 2 — representative 0.7 m/s runs
+Metric	PPO	Mission 2
+Runtime	1212.77 s	1211.96 s
+Distance	49.91 m	48.39 m
+Coverage	96.96%	85.69%
+Targets detected	10	9
+Targets inspected	5	6
+Abandoned	2	3
+First detection	74.84 s	38.87 s
+First inspection	109.71 s	79.45 s
 
-*Not yet available.* Matched runs (same world, same start) of `mission2`, `mission2c` and `rl` are planned; see below.
 
-## Gazebo experiments
+This single comparison is interesting but not sufficient to establish that either policy is better.
+PPO explored more of the map in this run and abandoned fewer targets, while Mission 2 detected and inspected a target earlier.
+Repeated matched runs are required before drawing a general conclusion.
+Earlier Gazebo Mission 2 reference
+An earlier longer Mission 2 run produced:
+Metric	Result
+Runtime	1999.8 s
+Distance	93.5 m
+Final coverage	97.35%
+Target entries detected	15
+Targets inspected	11
+Targets abandoned	4
+First detection	24.8 s
+First inspection	51.8 s
+Stuck events	13
+Average decision latency	186 ms
 
-`sar_training/gazebo_deploy/explorer_rl_node.py` inherits from the Mission 2 node and adds a switch:
 
-| `policy_mode` | What runs |
-|---|---|
-| `mission2` | The original Mission 2 node, unchanged (reference) |
-| `mission2c` | The Mission 2 rule applied to the shared candidate set (fair baseline) |
-| `rl` | The PPO policy choosing from the same candidate set |
+The target count here refers to semantic-database entries. Multiple entries can correspond to the same physical person because of duplicate detections.
+The Gazebo worlds contain six person models.
+Perception and navigation engineering
+The project also involved several system-level changes that were necessary before the exploration experiments were useful.
+RGB-D camera placement
+Early versions used a low-mounted camera. This caused problems with low-lying objects and scene visibility.
+The camera was moved to a mast-mounted configuration and combined with depth for 3D target localisation.
+<p align="center">
+  <img src="docs/media/mast_rgbd.png" width="80%">
+</p>
 
-Each run writes to `~/ares_results/run_NNN/`: `experiment_summary.csv`, `frontier_decisions.csv`, `target_milestones.csv`, and for `mission2c`/`rl` also `rl_decisions.csv`, `rl_candidates.csv` (every candidate, its features and the chosen one) and `rl_globals.csv`.
+This separated semantic target detection from the 2D LiDAR used primarily for navigation and mapping.
+Opportunistic target capture
+Target evidence is captured when the perception pipeline has a sufficiently confident detection within the configured distance range, rather than introducing a separate blocking rotate-and-capture action.
+The reasoning is practical: during a search mission, a target can move or disappear while the robot is performing an additional alignment manoeuvre.
+The approach therefore favours:
+detect
+  ↓
+localise
+  ↓
+capture evidence when conditions are satisfied
+  ↓
+continue navigation
 
-*Representative runs and plots: to be added.*
+rather than:
+detect
+  ↓
+stop
+  ↓
+rotate to target
+  ↓
+verify orientation
+  ↓
+capture
+  ↓
+resume navigation
 
-## Environments
+The latter introduces additional control and verification dependencies.
+Runtime measurements
+The perception stack was also profiled to quantify its effect on the exploration loop.
+One PyTorch CPU + YOLO configuration produced:
+Component	Measured value
+Average decision latency	329.1 ms
+Frontier detection	73.2 ms
+Information-gain evaluation	88.9 ms
+Goal-cell selection	~8–22 ms
+Async path planning	108.7 ms
 
-Worlds are in `src/minibot/worlds/`. The two main worlds share the same building: a west entrance, an east-west corridor and six rooms, with doorways of different widths (including one narrow doorway), loop doors between rooms, clutter, and six person models.
 
-| World | Description |
-|---|---|
-| `baselinebest.sdf` (same as `baseline4.sdf`) | Clean version of the building |
-| `gazebo1.sdf` (same as `underground.sdf`) | Same building with floor zones, puddles, debris, grime, fog layers and smoke (low visibility) |
-| `baseline1.sdf` to `baseline3.sdf` | Earlier worlds (empty, generated maze, first building version) |
+The main measurable increase came from CPU contention during perception and information-gain evaluation.
+These measurements are implementation diagnostics rather than the main exploration result.
+Navigation planner comparison
+A separate diagnostic experiment compared NavFn and SMAC 2D under a perception-heavy configuration.
+Metric	NavFn + YOLO	SMAC 2D + YOLO
+Runtime	21:23.9	21:36.5
+Distance	140.02 m	188.67 m
+Coverage	59.66%	73.55%
+Frontier decisions	18	47
+Targets detected	9	4
+Targets inspected	6	2
+Abandoned	2	2
+First detection	413.38 s	58.78 s
+First inspection	481.72 s	138.24 s
+Average decision latency	251.96 ms	278.00 ms
+Frontier processing	81.62 ms	86.40 ms
+Path planning	99.67 ms	105.69 ms
 
-## Repository structure
 
-```
+This was a diagnostic comparison rather than part of the primary PPO-vs-Mission2 experiment.
+Environments
+The main building contains:
+- west entrance
+- east-west corridor
+- six rooms
+- multiple doorway widths
+- loop doors between rooms
+- clutter
+- six person models
+The repository contains several versions of the environment.
+World	Description
+baselinebest.sdf	Clean version of the main building
+baseline4.sdf	Clean main-building variant
+gazebo1.sdf	Low-visibility / cluttered version
+underground.sdf	Low-visibility building variant
+baseline1.sdf–baseline3.sdf	Earlier experimental worlds
+
+
+The clean environment is used for controlled quantitative comparisons.
+The darker environment adds visual clutter, fog, debris and lighting changes and is primarily useful for robustness experiments and demonstrations.
+Repository structure
 src/
-  minibot/             Robot description, Gazebo worlds, launch files, Nav2/SLAM/EKF configs
-  frontier_explorer/   Mission 2 explorer node (mission2.py) and earlier versions
-  semantic_perception/ YOLO detector node and semantic database
-  semantic_interfaces/ Custom messages and services for targets
+├── minibot/
+│   ├── description/        Robot URDF/Xacro
+│   ├── launch/              Camera, EKF/SLAM/Nav2 and semantic launch files
+│   ├── config/              Nav2 and motion configuration
+│   └── worlds/              Gazebo environments
+│
+├── frontier_explorer/
+│   └── frontier_explorer/
+│       ├── mission2.py      Main hand-designed exploration policy
+│       └── mission2withc.py Earlier exploration variant
+│
+├── semantic_perception/
+│   └── semantic_perception/
+│       ├── yolo_detector.py
+│       └── semantic_database.py
+│
+└── semantic_interfaces/
+    └── msg/                 Semantic target messages
+
 sar_training/
-  sar_rl/              2D simulator, layouts, PPO policy network, vectorised env
-  train_ppo.py         PPO training
-  eval_sim.py          Compare a trained policy with the Mission 2 rule in the simulator
-  check_sim.py         Simulator sanity check
-  gazebo_deploy/       Export script, NumPy policy, RL explorer node, launch file
-  policy16.npz         Exported PPO policy (run16_baseline)
-yolo_ros/              Third-party ROS 2 YOLO wrapper (see Credits)
-behavior_trees/        Nav2 behavior tree
-yolo26n_openvino_model/ , *.pt   YOLO weights
-```
+├── sar_rl/                  2D simulator and PPO implementation
+├── train_ppo.py             PPO training
+├── eval_sim.py              Simulator evaluation
+├── check_sim.py             Simulator sanity checks
+├── gazebo_deploy/
+│   ├── explorer_rl_node.py
+│   ├── rl_explorer_launch.py
+│   ├── export_policy.py
+│   └── rl_policy_np.py
+├── runs/                    Training checkpoints and logs
+└── policy16.npz             Exported run16 PPO policy
 
-## Running the system
+behavior_trees/
+└── navigate_to_pose_w_smoothing.xml
 
-### Requirements
+yolo_ros/
+└── ROS 2 YOLO integration
 
-Ubuntu 24.04 and ROS 2 Jazzy with Gazebo, `ros_gz`, `ros2_control`, Nav2, `slam_toolbox`, `robot_localization`, `twist_mux` and `twist_stamper`. The minibot installation notes in `src/minibot/Package_Installation_Instruction.md` cover most of these. YOLO needs `ultralytics` (and `openvino` for the exported model).
+Running the system
+Requirements
+The main development environment is:
+Ubuntu 24.04
+ROS 2 Jazzy
+Gazebo
+Nav2
+SLAM Toolbox
+robot_localization
+ros2_control
+twist_mux
+ros_gz
+Ultralytics YOLO
+OpenVINO
 
-### Build
-
-```bash
-git clone https://github.com/<your-username>/searchandrescuerover.git
+Build the workspace:
+git clone https://github.com/yuvanbruh/searchandrescuerover.git
 cd searchandrescuerover
+
 colcon build --symlink-install
 source install/setup.bash
-```
 
-### Mission 2 in Gazebo
+Mission 2 in Gazebo
+Start the Gazebo/robot/camera system:
+ros2 launch minibot cam.py
 
-Each command in its own terminal, with the workspace sourced:
+Start EKF, SLAM and Nav2 using the current launch file in the repository:
+ros2 launch minibot ekf.py
 
-```bash
-ros2 launch minibot cam.py        # Gazebo world (gazebo1.sdf), robot, bridge, RViz
-ros2 launch minibot ek.py         # EKF, SLAM Toolbox, Nav2
-ros2 launch minibot semantic.py   # Mission 2 explorer, YOLO detector, semantic database
-```
+Start the semantic perception and Mission 2 stack:
+ros2 launch minibot semantic.py
 
-### PPO (or the fair baseline) in Gazebo
+The exact launch arguments can be adjusted for the selected Gazebo world.
+PPO in Gazebo
+Start the robot, camera, EKF, SLAM and Nav2 stack first.
+Then run the PPO deployment:
+cd ~/last
+source install/setup.bash
 
-Start the first two launch files as above, then, from the repository root, instead of `semantic.py`:
-
-```bash
 ros2 launch sar_training/gazebo_deploy/rl_explorer_launch.py \
   base_module:=frontier_explorer.mission2 \
   policy_mode:=rl \
   model_path:=$PWD/sar_training/policy16.npz \
   script_path:=$PWD/sar_training/gazebo_deploy/explorer_rl_node.py \
   experiment_name:=rl16_01
-```
 
-Use `policy_mode:=mission2c` (and drop `model_path`) for the Mission 2 rule on the shared candidates. This launch file also starts the YOLO detector and the semantic database, so do not run `semantic.py` at the same time. Run it from a terminal that does not have a Python virtual environment active.
+For the fair hand-designed baseline using the same candidate generator:
+ros2 launch sar_training/gazebo_deploy/rl_explorer_launch.py \
+  base_module:=frontier_explorer.mission2 \
+  policy_mode:=mission2c \
+  script_path:=$PWD/sar_training/gazebo_deploy/explorer_rl_node.py \
+  experiment_name:=mission2c_01
 
-### Training and evaluating in the simulator
-
-No ROS is needed:
-
-```bash
+The RL deployment launch also starts the relevant perception components, so duplicate semantic launch processes should not be started simultaneously.
+Training the PPO policy
+The simulator does not require ROS.
 cd sar_training
+
 pip install numpy scipy matplotlib torch gymnasium
 
-python check_sim.py --episodes 5 --png                 # simulator sanity check
-python train_ppo.py --name run1 --total-steps 800000   # PPO training, writes runs/run1/
-python eval_sim.py --ckpt runs/run1/final.pt --episodes 50
-```
+Run a sanity check:
+python check_sim.py --episodes 5 --png
 
-To use a trained policy in Gazebo, export it first:
+Train PPO:
+python train_ppo.py \
+  --name run1 \
+  --total-steps 800000
+
+Evaluate a trained policy:
+python eval_sim.py \
+  --ckpt runs/run1/final.pt \
+  --episodes 50
+
+Export a trained PyTorch checkpoint for ROS deployment:
+python gazebo_deploy/export_policy.py \
+  --ckpt runs/run1/final.pt \
+  --out policy.npz
+
+The export script checks the NumPy implementation against the PyTorch policy before writing the deployment file.
+Current limitations
+The project is still under active development.
+1. PPO does not currently outperform Mission 2 overall
+The 50-episode simulator evaluation shows a small improvement in target inspection but higher time and travel cost.
+2. The current PPO reward needs another training iteration
+The run16_baseline policy was trained using the default reward configuration. Time and distance penalties were relatively weak, which is consistent with the learned policy travelling farther and taking longer.
+The next training condition will use the calibrated simulator and stronger efficiency/recovery penalties.
+3. Gazebo statistics are not yet sufficient
+The current Gazebo results include representative runs and one matched 0.7 m/s PPO/Mission 2 comparison.
+Repeated matched runs are still required before making a statistical claim about the real ROS 2/Gazebo system.
+4. Simulation is an approximation
+The 2D environment approximates:
+- Nav2 planning
+- perception timing
+- YOLO errors
+- localisation noise
+- stuck behaviour
+- driving time
+The simulator is calibrated against Gazebo, but the sim-to-Gazebo gap has not yet been fully quantified.
+5. Semantic exploration is a later experiment
+The current main comparison uses the geometric Mission 2 candidate-generation pipeline.
+A semantic-aware exploration branch is being developed separately so that structure-aware and learned exploration can be evaluated without changing the primary baseline retrospectively.
+Research status
+The current project has three layers of evaluation:
+                 ROS 2 / Gazebo system
+                         ^
+                         |
+                 deployment tests
+                         ^
+                         |
+                  2D simulator
+                         ^
+                         |
+                PPO training/evaluation
+
+The immediate research direction is:
+1. retrain PPO with the calibrated simulator and stronger efficiency penalties
+2. run repeated matched Gazebo experiments
+3. compare Mission 2, Mission 2 with the shared candidate generator, and PPO
+4. evaluate the clean and low-visibility environments separately
+5. report target inspection, time, distance, coverage, abandonment and stuck-event distributions
+6. investigate semantic structure cues as a separate extension
+The goal is not to assume that PPO is better than the hand-designed method. The experiment is intended to determine when, where and under what conditions a learned high-level policy is useful for autonomous search and rescue exploration.
+Credits and licenses
+Parts of the robot description and simulation structure were adapted from:
+- YJ0528/minibot
+- Articulated Robotics
+The yolo_ros/ directory is based on:
+- mgonzs13/yolo_ros
+Object detection uses:
+- Ultralytics
+twist_stamper is by Josh Newans.
+Please refer to the original repositories and included license files for the licensing terms of third-party components.
+The license for the original research code in:
+frontier_explorer
+semantic_perception
+sar_training
+
+will be specified separately.
+
+### The media files I'd use
+
+Before committing the README, make this directory:
 
 ```bash
-python gazebo_deploy/export_policy.py --ckpt runs/run1/final.pt --out policy.npz
-```
+mkdir -p docs/media
 
-The export script also checks that the NumPy version reproduces the PyTorch policy.
-
-## Limitations and current work
-
-- The PPO policy has not been evaluated in Gazebo yet, and in the simulator it is about on par with, not better than, the hand-designed policy.
-- `run16_baseline` was trained on the default simulator configuration with the default reward, which barely penalises time and distance. A second run on the calibrated simulator with stronger penalties is planned.
-- The simulator replaces Nav2 with a shortest-path planner and models stuck events, YOLO errors and timing statistically. It is calibrated to a single real Gazebo run, so the sim-to-Gazebo gap is not yet measured.
-- The Gazebo reference numbers come from one run; repeated runs are needed for a comparison.
-- Several launch files and configs still contain hard-coded paths and older versions kept as comments (see the notes below).
-- Hardware deployment is planned but has not been done; everything here is simulation.
-
-### Known issues to fix
-
-- `sim.launch.py` and `camd.py` load `playground.sdf`, which is not in `worlds/`. The experiments use `cam.py`.
-- The YOLO detector's default `model_path` is an absolute path on the author's machine; set it to `yolo26n_openvino_model/` in this repository.
-- `rl_explorer_launch.py` defaults to paths under `~/last/`; pass `model_path` and `script_path` explicitly as shown above.
-- `setup.py` in `frontier_explorer` and `semantic_perception` lists entry points for modules that do not exist (`logs`, `best`).
-- `mission2withc.py` is an earlier version of `mission2.py` (inspection radius 0.8 m, obstacle margin 3 cells, fixed goal heading).
-
-## Research status
-
-This is an ongoing student research project. Planned next steps: train the second PPO run on the calibrated simulator, run matched Gazebo experiments (`mission2`, `mission2c`, `rl`, several runs each) in the clean and the low-visibility world, then report coverage, distance, time, inspections, abandonments and stuck events with their spread.
-
-## Credits and licenses
-
-- The robot description, launch structure and Nav2/SLAM configuration in `src/minibot` are adapted from [YJ0528/minibot](https://github.com/YJ0528/minibot) (MIT; earlier history Apache-2.0, see `src/minibot/LICENSE` and `LICENSE.previous.md`), which follows the [Articulated Robotics](https://articulatedrobotics.xyz/) tutorials. The images and GIFs in `src/minibot/visual_demos/` come from that project, not from this one.
-- `yolo_ros/` is [mgonzs13/yolo_ros](https://github.com/mgonzs13/yolo_ros), licensed GPL-3.0.
-- Object detection uses [Ultralytics YOLO](https://github.com/ultralytics/ultralytics); check its license terms before redistributing weights.
-- `twist_stamper` is by Josh Newans.
-- The license for the original code in this repository (`frontier_explorer`, `semantic_perception`, `sar_training`) has not been chosen yet.
+Then put only these in it:
+docs/media/sar_demo.mp4
+docs/media/gazebo_rviz.png
+docs/media/ppo_09696_map.png
+docs/media/mast_rgbd.png
